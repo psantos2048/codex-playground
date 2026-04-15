@@ -8,7 +8,13 @@ amplifies a selected temporal frequency band, and writes an output video.
 ### Install dependencies
 
 ```bash
-pip install numpy opencv-python
+pip install numpy opencv-python-headless
+```
+
+If you want the `--interactive` slider window, install GUI-enabled OpenCV instead:
+
+```bash
+pip install opencv-python
 ```
 
 ### Basic usage

@@ -142,6 +142,21 @@ def read_video_frames(path: Path) -> tuple[np.ndarray, float, tuple[int, int], s
     return np.stack(frames, axis=0), fps, (width, height), codec
 
 
+def validate_frame_count(n_frames: int, fps: float, low_hz: float, high_hz: float) -> None:
+    if n_frames < 2:
+        raise ValueError("Need at least 2 frames for temporal frequency analysis")
+
+    freqs = np.fft.fftfreq(n_frames, d=1.0 / fps)
+    positive_bins = np.abs(freqs)
+    in_band = (positive_bins >= low_hz) & (positive_bins <= high_hz)
+    if not np.any(in_band):
+        min_resolvable = fps / n_frames
+        raise ValueError(
+            "No FFT bins fall inside the requested passband. "
+            f"Try more frames or adjust --low/--high (frequency resolution is ~{min_resolvable:.4f}Hz)."
+        )
+
+
 def gaussian_downsample(video: np.ndarray, levels: int) -> np.ndarray:
     cv2 = cv2_module()
     reduced = video
@@ -203,6 +218,7 @@ def temporal_ideal_bandpass(video: np.ndarray, fps: float, low: float, high: flo
 
 
 def magnify_video(video: np.ndarray, fps: float, config: EVMConfig) -> np.ndarray:
+    validate_frame_count(video.shape[0], fps, config.low_hz, config.high_hz)
     reduced = gaussian_downsample(video, config.pyramid_level)
 
     yiq = rgb_to_yiq(reduced)
@@ -210,11 +226,15 @@ def magnify_video(video: np.ndarray, fps: float, config: EVMConfig) -> np.ndarra
 
     filtered[..., 1:] *= config.chrom_attenuation
 
-    amplified = yiq + config.alpha * filtered
-    amplified_rgb = yiq_to_rgb(amplified)
+    # Amplify only the band-passed temporal signal and add it back to
+    # the full-resolution source to preserve image detail.
+    amplified_signal = config.alpha * filtered
+    amplified_rgb = yiq_to_rgb(amplified_signal)
 
-    upsampled = gaussian_upsample(amplified_rgb, config.pyramid_level, target_shape=video.shape[1:3])
-    combined = video + (upsampled - video)
+    upsampled_signal = gaussian_upsample(
+        amplified_rgb, config.pyramid_level, target_shape=video.shape[1:3]
+    )
+    combined = video + upsampled_signal
 
     return np.clip(combined, 0.0, 1.0)
 
