@@ -89,6 +89,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Open slider UI to set low/high frequency and alpha before processing",
     )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=None,
+        help="Process only the first N frames, useful for quick tuning/tests",
+    )
     return parser.parse_args()
 
 
@@ -110,7 +116,9 @@ def validate_config(config: EVMConfig, fps: float) -> None:
         raise ValueError("--chrom-attenuation must be non-negative")
 
 
-def read_video_frames(path: Path) -> tuple[np.ndarray, float, tuple[int, int], str]:
+def read_video_frames(
+    path: Path, max_frames: int | None = None
+) -> tuple[np.ndarray, float, tuple[int, int], str]:
     cv2 = cv2_module()
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -126,6 +134,9 @@ def read_video_frames(path: Path) -> tuple[np.ndarray, float, tuple[int, int], s
     fourcc_val = int(cap.get(cv2.CAP_PROP_FOURCC))
     codec = "".join([chr((fourcc_val >> 8 * i) & 0xFF) for i in range(4)])
 
+    if max_frames is not None and max_frames < 2:
+        raise ValueError("--max-frames must be at least 2 when provided")
+
     frames = []
     while True:
         ok, frame = cap.read()
@@ -133,6 +144,8 @@ def read_video_frames(path: Path) -> tuple[np.ndarray, float, tuple[int, int], s
             break
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frames.append(frame_rgb.astype(np.float32) / 255.0)
+        if max_frames is not None and len(frames) >= max_frames:
+            break
 
     cap.release()
 
@@ -327,7 +340,9 @@ def run_interactive_tuner(defaults: EVMConfig, fps: float) -> EVMConfig:
 def main() -> int:
     args = parse_args()
 
-    video, fps, size, codec_hint = read_video_frames(args.input)
+    video, fps, size, codec_hint = read_video_frames(
+        args.input, max_frames=args.max_frames
+    )
 
     config = EVMConfig(
         low_hz=args.low,
