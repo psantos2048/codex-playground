@@ -17,10 +17,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
-
-
 _CV2 = None
+_NP = None
 
 
 def cv2_module():
@@ -36,6 +34,20 @@ def cv2_module():
     return _CV2
 
 
+def np_module():
+    global _NP
+    if _NP is None:
+        try:
+            _NP = importlib.import_module("numpy")
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                "NumPy is required but failed to import. "
+                "Try reinstalling with `pip install --force-reinstall numpy`, "
+                "or use a native Windows/Linux Python instead of Cygwin if available."
+            ) from exc
+    return _NP
+
+
 @dataclass
 class EVMConfig:
     low_hz: float
@@ -43,6 +55,14 @@ class EVMConfig:
     alpha: float
     pyramid_level: int
     chrom_attenuation: float
+
+
+def parse_frame_limit(value: str) -> int:
+    try:
+        return int(value)
+    except ValueError as exc:
+        # Let main() report invalid frame limits like video-loading errors.
+        raise RuntimeError("--max-frames must be an integer") from exc
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-frames",
-        type=int,
+        type=parse_frame_limit,
         default=None,
         help="Process only the first N frames, useful for quick tuning/tests",
     )
@@ -119,35 +139,37 @@ def validate_config(config: EVMConfig, fps: float) -> None:
 def read_video_frames(
     path: Path, max_frames: int | None = None
 ) -> tuple[np.ndarray, float, tuple[int, int], str]:
-    cv2 = cv2_module()
-    cap = cv2.VideoCapture(str(path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Failed to open input video: {path}")
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        raise RuntimeError("Could not determine FPS from the input video")
-
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    fourcc_val = int(cap.get(cv2.CAP_PROP_FOURCC))
-    codec = "".join([chr((fourcc_val >> 8 * i) & 0xFF) for i in range(4)])
-
     if max_frames is not None and max_frames < 2:
         raise ValueError("--max-frames must be at least 2 when provided")
 
-    frames = []
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frames.append(frame_rgb.astype(np.float32) / 255.0)
-        if max_frames is not None and len(frames) >= max_frames:
-            break
+    np = np_module()
+    cv2 = cv2_module()
+    cap = cv2.VideoCapture(str(path))
+    try:
+        if not cap.isOpened():
+            raise RuntimeError(f"Failed to open input video: {path}")
 
-    cap.release()
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            raise RuntimeError("Could not determine FPS from the input video")
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        fourcc_val = int(cap.get(cv2.CAP_PROP_FOURCC))
+        codec = "".join([chr((fourcc_val >> 8 * i) & 0xFF) for i in range(4)])
+
+        frames = []
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(frame_rgb.astype(np.float32) / 255.0)
+            if max_frames is not None and len(frames) >= max_frames:
+                break
+    finally:
+        cap.release()
 
     if not frames:
         raise RuntimeError("Input video contains no frames")
@@ -156,6 +178,7 @@ def read_video_frames(
 
 
 def validate_frame_count(n_frames: int, fps: float, low_hz: float, high_hz: float) -> None:
+    np = np_module()
     if n_frames < 2:
         raise ValueError("Need at least 2 frames for temporal frequency analysis")
 
@@ -172,6 +195,7 @@ def validate_frame_count(n_frames: int, fps: float, low_hz: float, high_hz: floa
 
 def gaussian_downsample(video: np.ndarray, levels: int) -> np.ndarray:
     cv2 = cv2_module()
+    np = np_module()
     reduced = video
     for _ in range(levels):
         reduced_frames = [cv2.pyrDown(frame) for frame in reduced]
@@ -181,6 +205,7 @@ def gaussian_downsample(video: np.ndarray, levels: int) -> np.ndarray:
 
 def gaussian_upsample(video: np.ndarray, levels: int, target_shape: tuple[int, int]) -> np.ndarray:
     cv2 = cv2_module()
+    np = np_module()
     expanded = video
     for _ in range(levels):
         expanded_frames = [cv2.pyrUp(frame) for frame in expanded]
@@ -195,6 +220,7 @@ def gaussian_upsample(video: np.ndarray, levels: int, target_shape: tuple[int, i
 
 
 def rgb_to_yiq(video: np.ndarray) -> np.ndarray:
+    np = np_module()
     m = np.array(
         [
             [0.299, 0.587, 0.114],
@@ -207,6 +233,7 @@ def rgb_to_yiq(video: np.ndarray) -> np.ndarray:
 
 
 def yiq_to_rgb(video: np.ndarray) -> np.ndarray:
+    np = np_module()
     m_inv = np.array(
         [
             [1.0, 0.956, 0.621],
@@ -219,6 +246,7 @@ def yiq_to_rgb(video: np.ndarray) -> np.ndarray:
 
 
 def temporal_ideal_bandpass(video: np.ndarray, fps: float, low: float, high: float) -> np.ndarray:
+    np = np_module()
     n_frames = video.shape[0]
     freqs = np.fft.fftfreq(n_frames, d=1.0 / fps)
     fft_video = np.fft.fft(video, axis=0)
@@ -231,6 +259,7 @@ def temporal_ideal_bandpass(video: np.ndarray, fps: float, low: float, high: flo
 
 
 def magnify_video(video: np.ndarray, fps: float, config: EVMConfig) -> np.ndarray:
+    np = np_module()
     validate_frame_count(video.shape[0], fps, config.low_hz, config.high_hz)
     reduced = gaussian_downsample(video, config.pyramid_level)
 
@@ -254,6 +283,7 @@ def magnify_video(video: np.ndarray, fps: float, config: EVMConfig) -> np.ndarra
 
 def write_video(frames_rgb: np.ndarray, path: Path, fps: float, size: tuple[int, int], codec_hint: str) -> None:
     cv2 = cv2_module()
+    np = np_module()
     if codec_hint.strip("\x00"):
         fourcc = cv2.VideoWriter_fourcc(*codec_hint)
     else:
@@ -277,8 +307,15 @@ def write_video(frames_rgb: np.ndarray, path: Path, fps: float, size: tuple[int,
 
 def run_interactive_tuner(defaults: EVMConfig, fps: float) -> EVMConfig:
     cv2 = cv2_module()
+    np = np_module()
     window = "EVM Tuning"
-    cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    try:
+        cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Interactive sliders are unavailable in this OpenCV build. "
+            "Install GUI-enabled OpenCV (`pip install opencv-python`) and OS GUI libs."
+        ) from exc
 
     max_hz_slider = max(1, int((fps / 2.0) * 100))
 
@@ -338,21 +375,20 @@ def run_interactive_tuner(defaults: EVMConfig, fps: float) -> EVMConfig:
 
 
 def main() -> int:
-    args = parse_args()
-
-    video, fps, size, codec_hint = read_video_frames(
-        args.input, max_frames=args.max_frames
-    )
-
-    config = EVMConfig(
-        low_hz=args.low,
-        high_hz=args.high,
-        alpha=args.alpha,
-        pyramid_level=args.pyramid_level,
-        chrom_attenuation=args.chrom_attenuation,
-    )
-
     try:
+        args = parse_args()
+        video, fps, size, codec_hint = read_video_frames(
+            args.input, max_frames=args.max_frames
+        )
+
+        config = EVMConfig(
+            low_hz=args.low,
+            high_hz=args.high,
+            alpha=args.alpha,
+            pyramid_level=args.pyramid_level,
+            chrom_attenuation=args.chrom_attenuation,
+        )
+
         if args.interactive:
             config = run_interactive_tuner(config, fps)
 
